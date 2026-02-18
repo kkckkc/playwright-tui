@@ -112,6 +112,7 @@ async function main() {
 
   function quit(code = 0) {
     currentProcess?.kill();
+    reportProcess?.kill();
     renderer.destroy();
     process.exit(code);
   }
@@ -135,6 +136,7 @@ async function main() {
   let passCount = 0;
   let failCount = 0;
   let currentProcess: ChildProcess | null = null;
+  let reportProcess: ChildProcess | null = null;
   let outputLineId = 0;
   let selectedIdx = 0;
   const fileStatus = new Map<string, "passed" | "failed">();
@@ -195,7 +197,7 @@ async function main() {
       id: "header-hint",
       content: t`${dim(
         fg(COLORS.muted)(
-          "↑↓ navigate · r run · R run all · u update snapshots · g gui · x stop · q quit"
+          "↑↓ navigate · r run · R run all · u update snapshots · g gui · v report · x stop · q quit"
         )
       )}`,
     })
@@ -288,7 +290,7 @@ async function main() {
   const hintBox = new BoxRenderable(renderer, {
     id: "hints",
     width: "100%",
-    height: 9,
+    height: 10,
     border: ["top"],
     borderStyle: "single",
     borderColor: COLORS.border,
@@ -303,6 +305,7 @@ async function main() {
     ["R    ", "run all tests"],
     ["u    ", "update snapshots"],
     ["g    ", "open in GUI mode"],
+    ["v    ", "view HTML report"],
     ["x    ", "stop running"],
     ["q    ", "quit"],
   ]) {
@@ -464,11 +467,14 @@ async function main() {
     statusText.content = t`${fg(COLORS.yellow)(`⟳  ${actionLabel}…`)}`;
     updateCounts();
 
-    const args = ["test", "--reporter=list"];
+    const args = ["test", "--reporter=list,html"];
     if (updateSnapshots) args.push("--update-snapshots");
     if (file) args.push(join(ROOT, file));
 
-    const proc = spawn(PLAYWRIGHT_BIN, args, { cwd: ROOT });
+    const proc = spawn(PLAYWRIGHT_BIN, args, {
+      cwd: ROOT,
+      env: { ...process.env, PLAYWRIGHT_HTML_OPEN: "never" },
+    });
     currentProcess = proc;
 
     let stdoutBuf = "";
@@ -526,7 +532,6 @@ async function main() {
 
   function openGui(file: string | null) {
     const label = file ?? "all tests";
-    appendOutput(t`${bold(fg(COLORS.blue)("⬡"))} ${bold(`Opening GUI for ${label}`)}`);
 
     const args = ["test", "--ui"];
     if (file) args.push(join(ROOT, file));
@@ -536,6 +541,17 @@ async function main() {
       detached: true,
       stdio: "ignore",
     }).unref();
+  }
+
+  // ── HTML report viewer ────────────────────────────────────────────────────
+
+  function openHtmlReport() {
+    reportProcess?.kill();
+    reportProcess = spawn(PLAYWRIGHT_BIN, ["show-report"], {
+      cwd: ROOT,
+      stdio: "ignore",
+    });
+    reportProcess.on("close", () => { reportProcess = null; });
   }
 
   // ── Key bindings ──────────────────────────────────────────────────────────
@@ -580,6 +596,11 @@ async function main() {
     // Open in GUI mode
     if (key.name === "g") {
       openGui(getSelectedValue());
+    }
+
+    // View HTML report
+    if (key.name === "v") {
+      openHtmlReport();
     }
   });
 
