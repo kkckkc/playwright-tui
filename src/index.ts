@@ -62,7 +62,7 @@ const COLORS = {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-function stripAnsi(str: string): string {
+const stripAnsi = (str: string): string => {
   return str.replace(
     // eslint-disable-next-line no-control-regex
     /[\x1B\x9B][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><~]/g,
@@ -70,11 +70,11 @@ function stripAnsi(str: string): string {
   );
 }
 
-function getTestFiles(): string[] {
+const getTestFiles = (): string[] => {
   const results: string[] = [];
   const ignored = new Set(["node_modules", ".git", "dist", "build", ".next", "out"]);
 
-  function scan(dir: string) {
+  const scan = (dir: string) => {
     let entries;
     try {
       entries = readdirSync(dir, { withFileTypes: true });
@@ -104,13 +104,13 @@ function getTestFiles(): string[] {
 
 // ── Main ─────────────────────────────────────────────────────────────────────
 
-async function main() {
+const main = async () => {
   const renderer = await createCliRenderer({
     exitOnCtrlC: false, // handled manually so we can kill subprocesses
     targetFps: 30,
   });
 
-  function quit(code = 0) {
+  const quit = (code = 0) => {
     currentProcess?.kill();
     reportProcess?.kill();
     renderer.destroy();
@@ -233,7 +233,7 @@ async function main() {
   });
   leftPanel.add(fileListScroll);
 
-  function itemContent(value: string, isSelected: boolean) {
+  const itemContent = (value: string, isSelected: boolean) => {
     const label = value === "__all__" ? "▶  Run All Tests" : `   ${basename(value)}`;
     if (isSelected) return t`${fg("#ffffff")(label)}`;
     const status = value !== "__all__" ? fileStatus.get(value) : undefined;
@@ -241,7 +241,7 @@ async function main() {
     return t`${fg(COLORS.text)(label)}`;
   }
 
-  function buildFileItems() {
+  const buildFileItems = () => {
     const values = ["__all__", ...testFiles];
     values.forEach((value, i) => {
       const isSelected = i === selectedIdx;
@@ -262,7 +262,7 @@ async function main() {
     });
   }
 
-  function refreshFileItems() {
+  const refreshFileItems = () => {
     fileItems.forEach((item, i) => {
       const isSelected = i === selectedIdx;
       item.box.backgroundColor = isSelected ? COLORS.selectedBg : COLORS.bg;
@@ -271,13 +271,13 @@ async function main() {
     fileListScroll.scrollTo(Math.max(0, selectedIdx - 2));
   }
 
-  function moveSelection(delta: number) {
+  const moveSelection = (delta: number) => {
     const total = fileItems.length;
     selectedIdx = ((selectedIdx + delta) % total + total) % total;
     refreshFileItems();
   }
 
-  function getSelectedValue(): string | null {
+  const getSelectedValue = (): string | null => {
     const item = fileItems[selectedIdx];
     if (!item || item.value === "__all__") return null;
     return item.value;
@@ -383,19 +383,19 @@ async function main() {
   // ── Output helpers ────────────────────────────────────────────────────────
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  function appendOutput(content: any) {
+  const appendOutput = (content: any) => {
     const id = `out-${outputLineId++}`;
     outputScroll.add(new TextRenderable(renderer, { id, content }));
   }
 
-  function updateCounts() {
+  const updateCounts = () => {
     passLabel.content = t`${bold(fg(COLORS.green)(`✓ ${passCount} passed`))}`;
     failLabel.content = failCount > 0
       ? t`${bold(fg(COLORS.red)(`✗ ${failCount} failed`))}`
       : t``;
   }
 
-  function clearOutput() {
+  const clearOutput = () => {
     outputLineId = 0;
     const children = [...outputScroll.getChildren()];
     for (const child of children) {
@@ -405,7 +405,7 @@ async function main() {
     }
   }
 
-  function colorizeLine(raw: string): unknown {
+  const colorizeLine = (raw: string): unknown => {
     const line = stripAnsi(raw);
     if (/✓|passed|PASS\b/.test(line)) return t`${fg(COLORS.green)(line)}`;
     if (/✗|✘|×|FAIL\b|Error:/.test(line)) return t`${fg(COLORS.red)(line)}`;
@@ -417,7 +417,7 @@ async function main() {
     return t`${fg(COLORS.muted)(line)}`;
   }
 
-  function processLine(raw: string, isStderr = false) {
+  const processLine = (raw: string, isStderr = false) => {
     const clean = stripAnsi(raw);
     if (!clean.trim()) return;
 
@@ -443,7 +443,7 @@ async function main() {
 
   // ── Test runner ───────────────────────────────────────────────────────────
 
-  function runTests(file: string | null, updateSnapshots = false) {
+  const runTests = (file: string | null, updateSnapshots = false) => {
     if (running) {
       appendOutput(
         t`${fg(COLORS.yellow)("Already running — press x to stop")}`
@@ -528,9 +528,7 @@ async function main() {
 
   // ── GUI mode launcher ─────────────────────────────────────────────────────
 
-  function openGui(file: string | null) {
-    const label = file ?? "all tests";
-
+  const openGui = (file: string | null) => {
     const args = ["test", "--ui"];
     if (file) args.push(join(ROOT, file));
 
@@ -543,7 +541,7 @@ async function main() {
 
   // ── HTML report viewer ────────────────────────────────────────────────────
 
-  function openHtmlReport() {
+  const openHtmlReport = () => {
     reportProcess?.kill();
     reportProcess = spawn(PLAYWRIGHT_BIN, ["show-report"], {
       cwd: ROOT,
