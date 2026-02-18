@@ -2,6 +2,8 @@
 
 A terminal user interface (TUI) for interactively running and managing Playwright test suites.
 
+The purpose is to easily debug, update snapshots and view reports without having to use the Playwright GUI.
+
 ![playwright-tui screenshot](screenshot.png)
 
 ## Requirements
