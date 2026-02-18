@@ -41,7 +41,7 @@ const main = async () => {
 
   renderer.setBackgroundColor(COLORS.bg);
 
-  const testFiles = getTestFiles();
+  let testFiles = getTestFiles();
 
   // ── Runtime state ─────────────────────────────────────────────────────────
   let running = false;
@@ -108,7 +108,7 @@ const main = async () => {
       id: "header-hint",
       content: t`${dim(
         fg(COLORS.muted)(
-          "↑↓ navigate · r run · R run all · u update snapshots · g gui · v report · x stop · q quit"
+          "↑↓ navigate · r run · a run all · R refresh · u update snapshots · g gui · v report · x stop · q quit"
         )
       )}`,
     })
@@ -201,7 +201,7 @@ const main = async () => {
   const hintBox = new BoxRenderable(renderer, {
     id: "hints",
     width: "100%",
-    height: 10,
+    height: 11,
     border: ["top"],
     borderStyle: "single",
     borderColor: COLORS.border,
@@ -213,7 +213,8 @@ const main = async () => {
 
   for (const [key, desc] of [
     ["r / ↵", "run selected file"],
-    ["R    ", "run all tests"],
+    ["a    ", "run all tests"],
+    ["R    ", "refresh file list"],
     ["u    ", "update snapshots"],
     ["g    ", "open in GUI mode"],
     ["v    ", "view HTML report"],
@@ -450,6 +451,24 @@ const main = async () => {
     reportProcess.on("close", () => { reportProcess = null; });
   }
 
+  // ── Test file list refresh ────────────────────────────────────────────────
+
+  const refreshTestFileList = () => {
+    testFiles = getTestFiles();
+
+    const children = [...fileListScroll.getChildren()];
+    for (const child of children) {
+      fileListScroll.remove(child.id);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (child as any).destroyRecursively?.() ?? (child as any).destroy?.();
+    }
+    fileItems.length = 0;
+
+    selectedIdx = Math.min(selectedIdx, testFiles.length);
+    buildFileItems();
+    statusText.content = t`${fg(COLORS.green)(`↻ Refreshed — found ${testFiles.length} test file(s)`)}`;
+  }
+
   // ── Key bindings ──────────────────────────────────────────────────────────
 
   renderer.keyInput.on("keypress", (key) => {
@@ -463,8 +482,14 @@ const main = async () => {
     if (key.name === "down") { moveSelection(1); return; }
 
     // Run all
-    if (key.name === "R" || (key.shift && key.name === "r")) {
+    if (key.name === "a") {
       runTests(null);
+      return;
+    }
+
+    // Refresh test file list
+    if (key.name === "R" || (key.shift && key.name === "r")) {
+      refreshTestFileList();
       return;
     }
 

@@ -2,6 +2,8 @@
 
 A terminal user interface (TUI) for interactively running and managing Playwright test suites.
 
+![playwright-tui screenshot](screenshot.png)
+
 ## Requirements
 
 - [Bun](https://bun.sh) runtime
@@ -27,7 +29,8 @@ pnpm start /path/to/your/playwright/project
 |------------|-------------------------------------|
 | `↑` / `↓` | Navigate test file list             |
 | `Enter` / `r` | Run selected test file           |
-| `R`        | Run all tests                       |
+| `a`        | Run all tests                       |
+| `R`        | Refresh test file list              |
 | `u`        | Update snapshots for selected file  |
 | `g`        | Open Playwright GUI mode            |
 | `v`        | View HTML report                    |
