@@ -1,6 +1,5 @@
 import { readdirSync } from "fs";
 import { join, relative } from "path";
-import { ROOT } from "./config";
 
 export const stripAnsi = (str: string): string => {
   return str.replace(
@@ -10,7 +9,7 @@ export const stripAnsi = (str: string): string => {
   );
 }
 
-export const getTestFiles = (): string[] => {
+export const getTestFiles = (root: string): string[] => {
   const results: string[] = [];
   const ignored = new Set(["node_modules", ".git", "dist", "build", ".next", "out"]);
 
@@ -33,11 +32,11 @@ export const getTestFiles = (): string[] => {
         entry.name.endsWith(".spec.mts") ||
         entry.name.endsWith(".test.mts")
       ) {
-        results.push(relative(ROOT, join(dir, entry.name)));
+        results.push(relative(root, join(dir, entry.name)));
       }
     }
   }
 
-  scan(ROOT);
+  scan(root);
   return results.sort();
 }

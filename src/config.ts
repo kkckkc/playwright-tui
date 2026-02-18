@@ -1,37 +1,43 @@
 import { existsSync } from "fs";
-import { resolve, join } from "path";
+import { resolve, join, basename } from "path";
 
-const targetArg = process.argv[2];
-if (!targetArg) {
-  console.error("Usage: playwright-tui <path-to-project>");
-  console.error("  <path-to-project> must contain a playwright.config.js or playwright.config.ts");
+const args = process.argv.slice(2);
+if (args.length === 0) {
+  console.error("Usage: playwright-tui <path-to-project> [<path-to-project> ...]");
+  console.error("  Each <path-to-project> must contain a playwright.config.js or playwright.config.ts");
   process.exit(1);
 }
 
-export const ROOT = resolve(targetArg);
+export const PROJECTS: Array<{ root: string; playwrightBin: string; label: string }> = [];
 
-if (!existsSync(ROOT)) {
-  console.error(`Error: directory not found: ${ROOT}`);
-  process.exit(1);
-}
+for (const arg of args) {
+  const root = resolve(arg);
 
-const hasConfig =
-  existsSync(join(ROOT, "playwright.config.js")) ||
-  existsSync(join(ROOT, "playwright.config.ts")) ||
-  existsSync(join(ROOT, "playwright.config.mjs")) ||
-  existsSync(join(ROOT, "playwright.config.cjs"));
+  if (!existsSync(root)) {
+    console.error(`Error: directory not found: ${root}`);
+    process.exit(1);
+  }
 
-if (!hasConfig) {
-  console.error(`Error: no playwright.config.js / playwright.config.ts found in ${ROOT}`);
-  process.exit(1);
-}
+  const hasConfig =
+    existsSync(join(root, "playwright.config.js")) ||
+    existsSync(join(root, "playwright.config.ts")) ||
+    existsSync(join(root, "playwright.config.mjs")) ||
+    existsSync(join(root, "playwright.config.cjs"));
 
-export const PLAYWRIGHT_BIN = resolve(ROOT, "node_modules/.bin/playwright");
+  if (!hasConfig) {
+    console.error(`Error: no playwright.config.js / playwright.config.ts found in ${root}`);
+    process.exit(1);
+  }
 
-if (!existsSync(PLAYWRIGHT_BIN)) {
-  console.error(`Error: playwright not found at ${PLAYWRIGHT_BIN}`);
-  console.error("Make sure node_modules is installed in the target project.");
-  process.exit(1);
+  const playwrightBin = resolve(root, "node_modules/.bin/playwright");
+
+  if (!existsSync(playwrightBin)) {
+    console.error(`Error: playwright not found at ${playwrightBin}`);
+    console.error("Make sure node_modules is installed in the target project.");
+    process.exit(1);
+  }
+
+  PROJECTS.push({ root, playwrightBin, label: basename(root) });
 }
 
 export const COLORS = {

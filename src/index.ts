@@ -10,9 +10,34 @@ import {
 } from "@opentui/core";
 import { spawn, type ChildProcess } from "child_process";
 import { join, basename } from "path";
-import { ROOT, PLAYWRIGHT_BIN, COLORS } from "./config";
+import { PROJECTS, COLORS } from "./config";
 import { stripAnsi, getTestFiles } from "./files";
 import { colorizeLine } from "./output";
+
+// ── Per-project state ────────────────────────────────────────────────────────
+
+interface FileItem {
+  box: BoxRenderable;
+  text: TextRenderable;
+  value: string; // "__all__" or relative file path
+}
+
+interface ProjectState {
+  root: string;
+  playwrightBin: string;
+  label: string;
+  testFiles: string[];
+  running: boolean;
+  passCount: number;
+  failCount: number;
+  currentProcess: ChildProcess | null;
+  reportProcess: ChildProcess | null;
+  selectedIdx: number;
+  fileStatus: Map<string, "passed" | "failed">;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  outputLines: any[];
+  fileItems: FileItem[];
+}
 
 // ── Main ─────────────────────────────────────────────────────────────────────
 
@@ -22,9 +47,27 @@ const main = async () => {
     targetFps: 30,
   });
 
+  const projects: ProjectState[] = PROJECTS.map(p => ({
+    ...p,
+    testFiles: getTestFiles(p.root),
+    running: false,
+    passCount: 0,
+    failCount: 0,
+    currentProcess: null,
+    reportProcess: null,
+    selectedIdx: 0,
+    fileStatus: new Map(),
+    outputLines: [],
+    fileItems: [],
+  }));
+
+  let activeProject = projects[0];
+
   const quit = (code = 0) => {
-    currentProcess?.kill();
-    reportProcess?.kill();
+    for (const p of projects) {
+      p.currentProcess?.kill();
+      p.reportProcess?.kill();
+    }
     renderer.destroy();
     process.exit(code);
   }
@@ -41,34 +84,17 @@ const main = async () => {
 
   renderer.setBackgroundColor(COLORS.bg);
 
-  let testFiles = getTestFiles();
-
-  // ── Runtime state ─────────────────────────────────────────────────────────
-  let running = false;
-  let passCount = 0;
-  let failCount = 0;
-  let currentProcess: ChildProcess | null = null;
-  let reportProcess: ChildProcess | null = null;
-  let outputLineId = 0;
-  let selectedIdx = 0;
-  const fileStatus = new Map<string, "passed" | "failed">();
-
-  interface FileItem {
-    box: BoxRenderable;
-    text: TextRenderable;
-    value: string; // "__all__" or relative file path
-  }
-  const fileItems: FileItem[] = [];
-
   // ── Layout tree ──────────────────────────────────────────────────────────
   //
   //  renderer.root
   //  └── rootBox   [column]
   //      ├── headerBox   [row, height 3]
+  //      │   ├── "Playwright TUI" title
+  //      │   └── tab boxes × N
   //      ├── mainBox     [row, flexGrow 1]
   //      │   ├── leftPanel  [column, width 40]
   //      │   │   ├── fileSelect  [flexGrow 1]
-  //      │   │   └── hintBox     [height 7]
+  //      │   │   └── hintBox     [height N]
   //      │   └── rightPanel [column, flexGrow 1]
   //      │       └── outputScroll [flexGrow 1]
   //      └── statusBar  [row, height 3]
@@ -103,16 +129,41 @@ const main = async () => {
       content: t`${bold(fg(COLORS.green)("Playwright TUI"))}`,
     })
   );
-  headerBox.add(
-    new TextRenderable(renderer, {
-      id: "header-hint",
-      content: t`${dim(
-        fg(COLORS.muted)(
-          "↑↓ navigate · r run · a run all · R refresh · u update snapshots · g gui · v report · x stop · q quit"
-        )
-      )}`,
-    })
+
+  // Build tab renderables (one per project)
+  const tabTexts: TextRenderable[] = projects.map((p, i) => {
+    const label = projects.length > 1 ? ` ${i + 1}: ${p.label} ` : ` ${p.label} `;
+    const text = new TextRenderable(renderer, {
+      id: `tab-${i}`,
+      content: t`${bold(fg("#ffffff")(label))}`,
+    });
+    const tabBox = new BoxRenderable(renderer, {
+      id: `tab-box-${i}`,
+      backgroundColor: COLORS.selectedBg,
+      paddingLeft: 1,
+      paddingRight: 1,
+    });
+    tabBox.add(text);
+    headerBox.add(tabBox);
+    return text;
+  });
+
+  const tabBoxes: BoxRenderable[] = projects.map((_, i) =>
+    headerBox.getChildren().find(c => c.id === `tab-box-${i}`) as BoxRenderable
   );
+
+  const refreshTabBar = () => {
+    projects.forEach((p, i) => {
+      const isActive = p === activeProject;
+      const label = projects.length > 1 ? ` ${i + 1}: ${p.label} ` : ` ${p.label} `;
+      tabBoxes[i].backgroundColor = isActive ? COLORS.selectedBg : COLORS.bg;
+      tabTexts[i].content = isActive
+        ? t`${bold(fg("#ffffff")(label))}`
+        : t`${dim(fg(COLORS.muted)(label))}`;
+    });
+  }
+
+  refreshTabBar();
 
   // ── Main area ─────────────────────────────────────────────────────────────
 
@@ -145,18 +196,18 @@ const main = async () => {
   });
   leftPanel.add(fileListScroll);
 
-  const itemContent = (value: string, isSelected: boolean) => {
+  const itemContent = (state: ProjectState, value: string, isSelected: boolean) => {
     const label = value === "__all__" ? "▶  Run All Tests" : `   ${basename(value)}`;
     if (isSelected) return t`${fg("#ffffff")(label)}`;
-    const status = value !== "__all__" ? fileStatus.get(value) : undefined;
+    const status = value !== "__all__" ? state.fileStatus.get(value) : undefined;
     if (status === "failed") return t`${fg(COLORS.red)(label)}`;
     return t`${fg(COLORS.text)(label)}`;
   }
 
-  const buildFileItems = () => {
-    const values = ["__all__", ...testFiles];
+  const buildFileItems = (state: ProjectState) => {
+    const values = ["__all__", ...state.testFiles];
     values.forEach((value, i) => {
-      const isSelected = i === selectedIdx;
+      const isSelected = i === state.selectedIdx;
       const box = new BoxRenderable(renderer, {
         id: `fi-${i}`,
         width: "100%",
@@ -166,42 +217,68 @@ const main = async () => {
       });
       const text = new TextRenderable(renderer, {
         id: `fi-${i}-t`,
-        content: itemContent(value, isSelected),
+        content: itemContent(state, value, isSelected),
       });
       box.add(text);
       fileListScroll.add(box);
-      fileItems.push({ box, text, value });
+      state.fileItems.push({ box, text, value });
     });
   }
 
-  const refreshFileItems = () => {
-    fileItems.forEach((item, i) => {
-      const isSelected = i === selectedIdx;
+  const clearFileList = (state: ProjectState) => {
+    const children = [...fileListScroll.getChildren()];
+    for (const child of children) {
+      fileListScroll.remove(child.id);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (child as any).destroyRecursively?.() ?? (child as any).destroy?.();
+    }
+    state.fileItems.length = 0;
+  }
+
+  const refreshFileItems = (state: ProjectState) => {
+    state.fileItems.forEach((item, i) => {
+      const isSelected = i === state.selectedIdx;
       item.box.backgroundColor = isSelected ? COLORS.selectedBg : COLORS.bg;
-      item.text.content = itemContent(item.value, isSelected);
+      item.text.content = itemContent(state, item.value, isSelected);
     });
-    fileListScroll.scrollTo(Math.max(0, selectedIdx - 2));
+    fileListScroll.scrollTo(Math.max(0, state.selectedIdx - 2));
   }
 
   const moveSelection = (delta: number) => {
-    const total = fileItems.length;
-    selectedIdx = ((selectedIdx + delta) % total + total) % total;
-    refreshFileItems();
+    const total = activeProject.fileItems.length;
+    activeProject.selectedIdx = ((activeProject.selectedIdx + delta) % total + total) % total;
+    refreshFileItems(activeProject);
   }
 
   const getSelectedValue = (): string | null => {
-    const item = fileItems[selectedIdx];
+    const item = activeProject.fileItems[activeProject.selectedIdx];
     if (!item || item.value === "__all__") return null;
     return item.value;
   }
 
-  buildFileItems();
+  buildFileItems(activeProject);
 
   // Keyboard hints at the bottom of the left panel
+  const hintEntries: [string, string][] = [
+    ["r / ↵", "run selected file"],
+    ["a    ", "run all tests"],
+    ["R    ", "refresh file list"],
+    ["u    ", "update snapshots"],
+    ["g    ", "open in GUI mode"],
+    ["v    ", "view HTML report"],
+    ["x    ", "stop running"],
+    ["q    ", "quit"],
+  ];
+
+  if (projects.length > 1) {
+    hintEntries.push(["Tab  ", "switch tab"]);
+    hintEntries.push(["1-9  ", "jump to tab"]);
+  }
+
   const hintBox = new BoxRenderable(renderer, {
     id: "hints",
     width: "100%",
-    height: 11,
+    height: hintEntries.length + 3,
     border: ["top"],
     borderStyle: "single",
     borderColor: COLORS.border,
@@ -211,16 +288,7 @@ const main = async () => {
   });
   leftPanel.add(hintBox);
 
-  for (const [key, desc] of [
-    ["r / ↵", "run selected file"],
-    ["a    ", "run all tests"],
-    ["R    ", "refresh file list"],
-    ["u    ", "update snapshots"],
-    ["g    ", "open in GUI mode"],
-    ["v    ", "view HTML report"],
-    ["x    ", "stop running"],
-    ["q    ", "quit"],
-  ]) {
+  for (const [key, desc] of hintEntries) {
     hintBox.add(
       new TextRenderable(renderer, {
         id: `hint-${key.trim()}`,
@@ -296,85 +364,92 @@ const main = async () => {
   // ── Output helpers ────────────────────────────────────────────────────────
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const appendOutput = (content: any) => {
-    const id = `out-${outputLineId++}`;
-    outputScroll.add(new TextRenderable(renderer, { id, content }));
-  }
-
-  const updateCounts = () => {
-    passLabel.content = t`${bold(fg(COLORS.green)(`✓ ${passCount} passed`))}`;
-    failLabel.content = failCount > 0
-      ? t`${bold(fg(COLORS.red)(`✗ ${failCount} failed`))}`
-      : t``;
-  }
-
-  const clearOutput = () => {
-    outputLineId = 0;
-    const children = [...outputScroll.getChildren()];
-    for (const child of children) {
-      outputScroll.remove(child.id);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (child as any).destroyRecursively?.() ?? (child as any).destroy?.();
+  const appendOutput = (state: ProjectState, content: any) => {
+    state.outputLines.push(content);
+    if (state === activeProject) {
+      outputScroll.add(new TextRenderable(renderer, {
+        id: `out-${state.outputLines.length - 1}`,
+        content,
+      }));
     }
   }
 
-  const processLine = (raw: string, isStderr = false) => {
+  const updateCounts = () => {
+    passLabel.content = t`${bold(fg(COLORS.green)(`✓ ${activeProject.passCount} passed`))}`;
+    failLabel.content = activeProject.failCount > 0
+      ? t`${bold(fg(COLORS.red)(`✗ ${activeProject.failCount} failed`))}`
+      : t``;
+  }
+
+  const clearOutput = (state: ProjectState) => {
+    state.outputLines.length = 0;
+    if (state === activeProject) {
+      const children = [...outputScroll.getChildren()];
+      for (const child of children) {
+        outputScroll.remove(child.id);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (child as any).destroyRecursively?.() ?? (child as any).destroy?.();
+      }
+    }
+  }
+
+  const processLine = (state: ProjectState, raw: string, isStderr = false) => {
     const clean = stripAnsi(raw);
     if (!clean.trim()) return;
 
     // Extract pass/fail counts from the summary line
     const pm = clean.match(/(\d+) passed/);
     const fm = clean.match(/(\d+) failed/);
-    if (pm) passCount = parseInt(pm[1]);
-    if (fm) failCount = parseInt(fm[1]);
-    updateCounts();
+    if (pm) state.passCount = parseInt(pm[1]);
+    if (fm) state.failCount = parseInt(fm[1]);
+    if (state === activeProject) updateCounts();
 
     // Detect failing test file from list reporter lines like:
     //   ✗ [chromium] › tests/foo.spec.ts:10:1 › test name
     const failLine = clean.match(/[✗✘×]\s+.*?›\s+([^\s:]+\.(spec|test)\.[jt]s)/);
     if (failLine) {
       const failedFile = failLine[1];
-      if (testFiles.includes(failedFile)) {
-        fileStatus.set(failedFile, "failed");
+      if (state.testFiles.includes(failedFile)) {
+        state.fileStatus.set(failedFile, "failed");
       }
     }
 
-    appendOutput(isStderr ? t`${fg(COLORS.red)(clean)}` : colorizeLine(raw));
+    appendOutput(state, isStderr ? t`${fg(COLORS.red)(clean)}` : colorizeLine(raw));
   }
 
   // ── Test runner ───────────────────────────────────────────────────────────
 
-  const runTests = (file: string | null, updateSnapshots = false) => {
-    if (running) {
-      appendOutput(
-        t`${fg(COLORS.yellow)("Already running — press x to stop")}`
-      );
+  const runTests = (state: ProjectState, file: string | null, updateSnapshots = false) => {
+    if (state.running) {
+      appendOutput(state, t`${fg(COLORS.yellow)("Already running — press x to stop")}`);
       return;
     }
 
-    running = true;
-    passCount = 0;
-    failCount = 0;
-    clearOutput();
+    state.running = true;
+    state.passCount = 0;
+    state.failCount = 0;
+    clearOutput(state);
 
     const label = file ?? "all tests";
     const divider = t`${dim(fg(COLORS.border)("─".repeat(60)))}`;
 
     const actionLabel = updateSnapshots ? `Updating snapshots for ${label}` : `Running ${label}`;
-    appendOutput(t`${bold(fg(COLORS.green)("▶"))} ${bold(actionLabel)}`);
-    appendOutput(divider);
-    statusText.content = t`${fg(COLORS.yellow)(`⟳  ${actionLabel}…`)}`;
-    updateCounts();
+    appendOutput(state, t`${bold(fg(COLORS.green)("▶"))} ${bold(actionLabel)}`);
+    appendOutput(state, divider);
+    if (state === activeProject) {
+      statusText.content = t`${fg(COLORS.yellow)(`⟳  ${actionLabel}…`)}`;
+      updateCounts();
+    }
 
     const args = ["test", "--reporter=list,html"];
     if (updateSnapshots) args.push("--update-snapshots");
-    if (file) args.push(join(ROOT, file));
+    if (file) args.push(join(state.root, file));
 
-    const proc = spawn(PLAYWRIGHT_BIN, args, {
-      cwd: ROOT,
+    const proc = spawn(state.playwrightBin, args, {
+      cwd: state.root,
       env: { ...process.env, PLAYWRIGHT_HTML_OPEN: "never" },
     });
-    currentProcess = proc;
+    state.currentProcess = proc;
 
     let stdoutBuf = "";
     let stderrBuf = "";
@@ -383,58 +458,62 @@ const main = async () => {
       stdoutBuf += chunk.toString();
       const lines = stdoutBuf.split("\n");
       stdoutBuf = lines.pop() ?? "";
-      lines.forEach((l) => processLine(l));
+      lines.forEach((l) => processLine(state, l));
     });
 
     proc.stderr?.on("data", (chunk: Buffer) => {
       stderrBuf += chunk.toString();
       const lines = stderrBuf.split("\n");
       stderrBuf = lines.pop() ?? "";
-      lines.forEach((l) => processLine(l, true));
+      lines.forEach((l) => processLine(state, l, true));
     });
 
     proc.on("close", (code: number | null) => {
       // Flush any remaining buffered output
-      if (stdoutBuf.trim()) processLine(stdoutBuf);
-      if (stderrBuf.trim()) processLine(stderrBuf, true);
+      if (stdoutBuf.trim()) processLine(state, stdoutBuf);
+      if (stderrBuf.trim()) processLine(state, stderrBuf, true);
 
-      appendOutput(divider);
+      appendOutput(state, divider);
 
       if (code === 0) {
-        appendOutput(t`${bold(fg(COLORS.green)("✓ All tests passed"))}`);
-        statusText.content = t`${fg(COLORS.green)(`✓ Done — ${label}`)}`;
+        appendOutput(state, t`${bold(fg(COLORS.green)("✓ All tests passed"))}`);
+        if (state === activeProject) {
+          statusText.content = t`${fg(COLORS.green)(`✓ Done — ${label}`)}`;
+        }
       } else {
-        appendOutput(
-          t`${bold(fg(COLORS.red)(`✗ Finished with ${failCount} failure(s)`))}`
-        );
-        statusText.content = t`${fg(COLORS.red)(`✗ Failed — ${label}`)}`;
+        appendOutput(state, t`${bold(fg(COLORS.red)(`✗ Finished with ${state.failCount} failure(s)`))}`);
+        if (state === activeProject) {
+          statusText.content = t`${fg(COLORS.red)(`✗ Failed — ${label}`)}`;
+        }
       }
 
       // For single-file runs, update its status if not already set by line parsing
       if (file) {
         if (code === 0) {
-          fileStatus.set(file, "passed");
-        } else if (!fileStatus.has(file)) {
-          fileStatus.set(file, "failed");
+          state.fileStatus.set(file, "passed");
+        } else if (!state.fileStatus.has(file)) {
+          state.fileStatus.set(file, "failed");
         }
       }
 
       // Refresh the file list to reflect updated pass/fail status
-      refreshFileItems();
+      if (state === activeProject) {
+        refreshFileItems(state);
+      }
 
-      running = false;
-      currentProcess = null;
+      state.running = false;
+      state.currentProcess = null;
     });
   }
 
   // ── GUI mode launcher ─────────────────────────────────────────────────────
 
-  const openGui = (file: string | null) => {
+  const openGui = (state: ProjectState, file: string | null) => {
     const args = ["test", "--ui"];
-    if (file) args.push(join(ROOT, file));
+    if (file) args.push(join(state.root, file));
 
-    spawn(PLAYWRIGHT_BIN, args, {
-      cwd: ROOT,
+    spawn(state.playwrightBin, args, {
+      cwd: state.root,
       detached: true,
       stdio: "ignore",
     }).unref();
@@ -442,31 +521,53 @@ const main = async () => {
 
   // ── HTML report viewer ────────────────────────────────────────────────────
 
-  const openHtmlReport = () => {
-    reportProcess?.kill();
-    reportProcess = spawn(PLAYWRIGHT_BIN, ["show-report"], {
-      cwd: ROOT,
+  const openHtmlReport = (state: ProjectState) => {
+    state.reportProcess?.kill();
+    state.reportProcess = spawn(state.playwrightBin, ["show-report"], {
+      cwd: state.root,
       stdio: "ignore",
     });
-    reportProcess.on("close", () => { reportProcess = null; });
+    state.reportProcess.on("close", () => { state.reportProcess = null; });
+  }
+
+  // ── Tab switching ─────────────────────────────────────────────────────────
+
+  const switchToProject = (state: ProjectState) => {
+    activeProject = state;
+
+    // Rebuild file list for new active project
+    clearFileList(activeProject);
+    buildFileItems(activeProject);
+
+    // Rebuild output scroll from buffer
+    const children = [...outputScroll.getChildren()];
+    for (const child of children) {
+      outputScroll.remove(child.id);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (child as any).destroyRecursively?.() ?? (child as any).destroy?.();
+    }
+    state.outputLines.forEach((content, i) => {
+      outputScroll.add(new TextRenderable(renderer, { id: `out-${i}`, content }));
+    });
+
+    updateCounts();
+    refreshTabBar();
   }
 
   // ── Test file list refresh ────────────────────────────────────────────────
 
   const refreshTestFileList = () => {
-    testFiles = getTestFiles();
-
-    const children = [...fileListScroll.getChildren()];
-    for (const child of children) {
-      fileListScroll.remove(child.id);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (child as any).destroyRecursively?.() ?? (child as any).destroy?.();
+    // Refresh all projects
+    for (const p of projects) {
+      p.testFiles = getTestFiles(p.root);
+      p.selectedIdx = Math.min(p.selectedIdx, p.testFiles.length);
     }
-    fileItems.length = 0;
 
-    selectedIdx = Math.min(selectedIdx, testFiles.length);
-    buildFileItems();
-    statusText.content = t`${fg(COLORS.green)(`↻ Refreshed — found ${testFiles.length} test file(s)`)}`;
+    // Rebuild file list UI for active project
+    clearFileList(activeProject);
+    buildFileItems(activeProject);
+
+    statusText.content = t`${fg(COLORS.green)(`↻ Refreshed — found ${activeProject.testFiles.length} test file(s)`)}`;
   }
 
   // ── Key bindings ──────────────────────────────────────────────────────────
@@ -481,13 +582,36 @@ const main = async () => {
     if (key.name === "up") { moveSelection(-1); return; }
     if (key.name === "down") { moveSelection(1); return; }
 
+    // Tab switching (only when multiple projects)
+    if (projects.length > 1) {
+      if (key.name === "tab" && !key.shift) {
+        const idx = projects.indexOf(activeProject);
+        switchToProject(projects[(idx + 1) % projects.length]);
+        return;
+      }
+      if (key.name === "tab" && key.shift) {
+        const idx = projects.indexOf(activeProject);
+        switchToProject(projects[(idx - 1 + projects.length) % projects.length]);
+        return;
+      }
+      // Direct jump by number key 1-9
+      const numMatch = key.name?.match(/^([1-9])$/);
+      if (numMatch) {
+        const targetIdx = parseInt(numMatch[1]) - 1;
+        if (targetIdx < projects.length) {
+          switchToProject(projects[targetIdx]);
+          return;
+        }
+      }
+    }
+
     // Run all
     if (key.name === "a") {
-      runTests(null);
+      runTests(activeProject, null);
       return;
     }
 
-    // Refresh test file list
+    // Refresh test file list (all projects)
     if (key.name === "R" || (key.shift && key.name === "r")) {
       refreshTestFileList();
       return;
@@ -495,59 +619,53 @@ const main = async () => {
 
     // Stop running process
     if (key.name === "x") {
-      if (currentProcess) {
-        currentProcess.kill();
+      if (activeProject.currentProcess) {
+        activeProject.currentProcess.kill();
         statusText.content = t`${fg(COLORS.yellow)("⬛ Stopped by user")}`;
-        running = false;
-        currentProcess = null;
+        activeProject.running = false;
+        activeProject.currentProcess = null;
       }
       return;
     }
 
     // Run selected
     if (key.name === "r" || key.name === "return") {
-      runTests(getSelectedValue());
+      runTests(activeProject, getSelectedValue());
     }
 
     // Update snapshots for selected
     if (key.name === "u") {
-      runTests(getSelectedValue(), true);
+      runTests(activeProject, getSelectedValue(), true);
     }
 
     // Open in GUI mode
     if (key.name === "g") {
-      openGui(getSelectedValue());
+      openGui(activeProject, getSelectedValue());
     }
 
     // View HTML report
     if (key.name === "v") {
-      openHtmlReport();
+      openHtmlReport(activeProject);
     }
   });
 
   // ── Initial welcome message ────────────────────────────────────────────────
 
-  appendOutput(
-    t`${dim(
-      fg(COLORS.muted)(
-        "Welcome! Select a test file on the left, then press r or Enter to run it."
-      )
-    )}`
-  );
+  for (const state of projects) {
+    appendOutput(
+      state,
+      t`${dim(fg(COLORS.muted)("Welcome! Select a test file on the left, then press r or Enter to run it."))}`
+    );
 
-  if (testFiles.length === 0) {
-    appendOutput(
-      t`${fg(COLORS.yellow)(
-        `No test files found in ${ROOT}`
-      )}`
-    );
-  } else {
-    appendOutput(
-      t`${dim(fg(COLORS.muted)(`Project: ${ROOT}`))}`
-    );
-    appendOutput(
-      t`${dim(fg(COLORS.muted)(`Found ${testFiles.length} test file(s)`))} `
-    );
+    if (state.testFiles.length === 0) {
+      appendOutput(
+        state,
+        t`${fg(COLORS.yellow)(`No test files found in ${state.root}`)}`
+      );
+    } else {
+      appendOutput(state, t`${dim(fg(COLORS.muted)(`Project: ${state.root}`))}`);
+      appendOutput(state, t`${dim(fg(COLORS.muted)(`Found ${state.testFiles.length} test file(s)`))} `);
+    }
   }
 
   renderer.start();
