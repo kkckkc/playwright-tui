@@ -1,4 +1,4 @@
-# playwright-tui
+# Playwright TUI
 
 A terminal user interface (TUI) for interactively running and managing Playwright test suites.
 
@@ -16,7 +16,6 @@ The purpose is to easily debug, update snapshots and view reports without having
 
 ```bash
 pnpm install
-pnpm run pw:install  # install Chromium browser
 ```
 
 ## Usage
