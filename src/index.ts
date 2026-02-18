@@ -11,14 +11,43 @@ import {
   dim,
 } from "@opentui/core";
 import { spawn, type ChildProcess } from "child_process";
-import { readdirSync } from "fs";
-import { resolve, join } from "path";
+import { readdirSync, existsSync } from "fs";
+import { resolve, join, relative } from "path";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const ROOT = process.cwd();
-const TESTS_DIR = resolve(ROOT, "tests");
+const targetArg = process.argv[2];
+if (!targetArg) {
+  console.error("Usage: playwright-tui <path-to-project>");
+  console.error("  <path-to-project> must contain a playwright.config.js or playwright.config.ts");
+  process.exit(1);
+}
+
+const ROOT = resolve(targetArg);
+
+if (!existsSync(ROOT)) {
+  console.error(`Error: directory not found: ${ROOT}`);
+  process.exit(1);
+}
+
+const hasConfig =
+  existsSync(join(ROOT, "playwright.config.js")) ||
+  existsSync(join(ROOT, "playwright.config.ts")) ||
+  existsSync(join(ROOT, "playwright.config.mjs")) ||
+  existsSync(join(ROOT, "playwright.config.cjs"));
+
+if (!hasConfig) {
+  console.error(`Error: no playwright.config.js / playwright.config.ts found in ${ROOT}`);
+  process.exit(1);
+}
+
 const PLAYWRIGHT_BIN = resolve(ROOT, "node_modules/.bin/playwright");
+
+if (!existsSync(PLAYWRIGHT_BIN)) {
+  console.error(`Error: playwright not found at ${PLAYWRIGHT_BIN}`);
+  console.error("Make sure node_modules is installed in the target project.");
+  process.exit(1);
+}
 
 const COLORS = {
   bg: "#0d1117",
@@ -44,13 +73,35 @@ function stripAnsi(str: string): string {
 }
 
 function getTestFiles(): string[] {
-  try {
-    return readdirSync(TESTS_DIR)
-      .filter((f) => f.endsWith(".spec.ts") || f.endsWith(".test.ts"))
-      .sort();
-  } catch {
-    return [];
+  const results: string[] = [];
+  const ignored = new Set(["node_modules", ".git", "dist", "build", ".next", "out"]);
+
+  function scan(dir: string) {
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (ignored.has(entry.name) || entry.name.startsWith(".")) continue;
+      if (entry.isDirectory()) {
+        scan(join(dir, entry.name));
+      } else if (
+        entry.name.endsWith(".spec.ts") ||
+        entry.name.endsWith(".test.ts") ||
+        entry.name.endsWith(".spec.js") ||
+        entry.name.endsWith(".test.js") ||
+        entry.name.endsWith(".spec.mts") ||
+        entry.name.endsWith(".test.mts")
+      ) {
+        results.push(relative(ROOT, join(dir, entry.name)));
+      }
+    }
   }
+
+  scan(ROOT);
+  return results.sort();
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────
@@ -59,6 +110,22 @@ async function main() {
   const renderer = await createCliRenderer({
     exitOnCtrlC: false, // handled manually so we can kill subprocesses
     targetFps: 30,
+  });
+
+  function quit(code = 0) {
+    currentProcess?.kill();
+    renderer.destroy();
+    process.exit(code);
+  }
+
+  process.on("uncaughtException", (err) => {
+    console.error("Uncaught exception:", err);
+    quit(1);
+  });
+
+  process.on("unhandledRejection", (reason) => {
+    console.error("Unhandled rejection:", reason);
+    quit(1);
   });
 
   renderer.setBackgroundColor(COLORS.bg);
@@ -154,12 +221,12 @@ async function main() {
   const selectOptions: SelectOption[] = [
     {
       name: "▶  Run All Tests",
-      description: "Run the entire test suite",
+      description: "",
       value: "__all__",
     },
     ...testFiles.map((f) => ({
       name: `   ${f}`,
-      description: `run ${TESTS_DIR}/${f}`,
+      description: "",
       value: f,
     })),
   ];
@@ -174,9 +241,7 @@ async function main() {
     focusedTextColor: COLORS.text,
     selectedBackgroundColor: COLORS.selectedBg,
     selectedTextColor: "#ffffff",
-    descriptionColor: COLORS.muted,
-    selectedDescriptionColor: "#cae8ff",
-    showDescription: true,
+    showDescription: false,
     wrapSelection: true,
   });
   leftPanel.add(fileSelect);
@@ -270,7 +335,7 @@ async function main() {
 
   const failLabel = new TextRenderable(renderer, {
     id: "fail-count",
-    content: t`${bold(fg(COLORS.red)("✗ 0 failed"))}`,
+    content: t``,
   });
   statusBar.add(failLabel);
 
@@ -284,7 +349,9 @@ async function main() {
 
   function updateCounts() {
     passLabel.content = t`${bold(fg(COLORS.green)(`✓ ${passCount} passed`))}`;
-    failLabel.content = t`${bold(fg(COLORS.red)(`✗ ${failCount} failed`))}`;
+    failLabel.content = failCount > 0
+      ? t`${bold(fg(COLORS.red)(`✗ ${failCount} failed`))}`
+      : t``;
   }
 
   function clearOutput() {
@@ -347,7 +414,7 @@ async function main() {
     updateCounts();
 
     const args = ["test", "--reporter=list"];
-    if (file) args.push(join(TESTS_DIR, file));
+    if (file) args.push(join(ROOT, file));
 
     const proc = spawn(PLAYWRIGHT_BIN, args, { cwd: ROOT });
     currentProcess = proc;
@@ -398,8 +465,7 @@ async function main() {
   renderer.keyInput.on("keypress", (key) => {
     // Quit
     if (key.name === "q" || (key.ctrl && key.name === "c")) {
-      currentProcess?.kill();
-      process.exit(0);
+      quit();
     }
 
     // Run all
@@ -440,12 +506,15 @@ async function main() {
   if (testFiles.length === 0) {
     appendOutput(
       t`${fg(COLORS.yellow)(
-        "No test files found in ./tests — add .spec.ts or .test.ts files."
+        `No test files found in ${ROOT}`
       )}`
     );
   } else {
     appendOutput(
-      t`${dim(fg(COLORS.muted)(`Found ${testFiles.length} test file(s): ${testFiles.join(", ")}`))}`
+      t`${dim(fg(COLORS.muted)(`Project: ${ROOT}`))}`
+    );
+    appendOutput(
+      t`${dim(fg(COLORS.muted)(`Found ${testFiles.length} test file(s)`))} `
     );
   }
 
