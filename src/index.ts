@@ -2,9 +2,7 @@ import {
   createCliRenderer,
   BoxRenderable,
   TextRenderable,
-  SelectRenderable,
   ScrollBoxRenderable,
-  type SelectOption,
   t,
   fg,
   bold,
@@ -12,7 +10,7 @@ import {
 } from "@opentui/core";
 import { spawn, type ChildProcess } from "child_process";
 import { readdirSync, existsSync } from "fs";
-import { resolve, join, relative } from "path";
+import { resolve, join, relative, basename } from "path";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -138,6 +136,15 @@ async function main() {
   let failCount = 0;
   let currentProcess: ChildProcess | null = null;
   let outputLineId = 0;
+  let selectedIdx = 0;
+  const fileStatus = new Map<string, "passed" | "failed">();
+
+  interface FileItem {
+    box: BoxRenderable;
+    text: TextRenderable;
+    value: string; // "__all__" or relative file path
+  }
+  const fileItems: FileItem[] = [];
 
   // ── Layout tree ──────────────────────────────────────────────────────────
   //
@@ -218,33 +225,64 @@ async function main() {
   });
   mainBox.add(leftPanel);
 
-  const selectOptions: SelectOption[] = [
-    {
-      name: "▶  Run All Tests",
-      description: "",
-      value: "__all__",
-    },
-    ...testFiles.map((f) => ({
-      name: `   ${f}`,
-      description: "",
-      value: f,
-    })),
-  ];
-
-  const fileSelect = new SelectRenderable(renderer, {
-    id: "file-select",
+  const fileListScroll = new ScrollBoxRenderable(renderer, {
+    id: "file-list",
     flexGrow: 1,
-    options: selectOptions,
-    backgroundColor: COLORS.bg,
-    focusedBackgroundColor: COLORS.bg,
-    textColor: COLORS.text,
-    focusedTextColor: COLORS.text,
-    selectedBackgroundColor: COLORS.selectedBg,
-    selectedTextColor: "#ffffff",
-    showDescription: false,
-    wrapSelection: true,
+    contentOptions: { backgroundColor: COLORS.bg },
   });
-  leftPanel.add(fileSelect);
+  leftPanel.add(fileListScroll);
+
+  function itemContent(value: string, isSelected: boolean) {
+    const label = value === "__all__" ? "▶  Run All Tests" : `   ${basename(value)}`;
+    if (isSelected) return t`${fg("#ffffff")(label)}`;
+    const status = value !== "__all__" ? fileStatus.get(value) : undefined;
+    if (status === "failed") return t`${fg(COLORS.red)(label)}`;
+    return t`${fg(COLORS.text)(label)}`;
+  }
+
+  function buildFileItems() {
+    const values = ["__all__", ...testFiles];
+    values.forEach((value, i) => {
+      const isSelected = i === selectedIdx;
+      const box = new BoxRenderable(renderer, {
+        id: `fi-${i}`,
+        width: "100%",
+        height: 1,
+        backgroundColor: isSelected ? COLORS.selectedBg : COLORS.bg,
+        paddingLeft: 1,
+      });
+      const text = new TextRenderable(renderer, {
+        id: `fi-${i}-t`,
+        content: itemContent(value, isSelected),
+      });
+      box.add(text);
+      fileListScroll.add(box);
+      fileItems.push({ box, text, value });
+    });
+  }
+
+  function refreshFileItems() {
+    fileItems.forEach((item, i) => {
+      const isSelected = i === selectedIdx;
+      item.box.backgroundColor = isSelected ? COLORS.selectedBg : COLORS.bg;
+      item.text.content = itemContent(item.value, isSelected);
+    });
+    fileListScroll.scrollTo(Math.max(0, selectedIdx - 2));
+  }
+
+  function moveSelection(delta: number) {
+    const total = fileItems.length;
+    selectedIdx = ((selectedIdx + delta) % total + total) % total;
+    refreshFileItems();
+  }
+
+  function getSelectedValue(): string | null {
+    const item = fileItems[selectedIdx];
+    if (!item || item.value === "__all__") return null;
+    return item.value;
+  }
+
+  buildFileItems();
 
   // Keyboard hints at the bottom of the left panel
   const hintBox = new BoxRenderable(renderer, {
@@ -389,6 +427,16 @@ async function main() {
     if (fm) failCount = parseInt(fm[1]);
     updateCounts();
 
+    // Detect failing test file from list reporter lines like:
+    //   ✗ [chromium] › tests/foo.spec.ts:10:1 › test name
+    const failLine = clean.match(/[✗✘×]\s+.*?›\s+([^\s:]+\.(spec|test)\.[jt]s)/);
+    if (failLine) {
+      const failedFile = failLine[1];
+      if (testFiles.includes(failedFile)) {
+        fileStatus.set(failedFile, "failed");
+      }
+    }
+
     appendOutput(isStderr ? t`${fg(COLORS.red)(clean)}` : colorizeLine(raw));
   }
 
@@ -457,6 +505,18 @@ async function main() {
         statusText.content = t`${fg(COLORS.red)(`✗ Failed — ${label}`)}`;
       }
 
+      // For single-file runs, update its status if not already set by line parsing
+      if (file) {
+        if (code === 0) {
+          fileStatus.set(file, "passed");
+        } else if (!fileStatus.has(file)) {
+          fileStatus.set(file, "failed");
+        }
+      }
+
+      // Refresh the file list to reflect updated pass/fail status
+      refreshFileItems();
+
       running = false;
       currentProcess = null;
     });
@@ -480,13 +540,15 @@ async function main() {
 
   // ── Key bindings ──────────────────────────────────────────────────────────
 
-  fileSelect.focus();
-
   renderer.keyInput.on("keypress", (key) => {
     // Quit
     if (key.name === "q" || (key.ctrl && key.name === "c")) {
       quit();
     }
+
+    // Navigate
+    if (key.name === "up") { moveSelection(-1); return; }
+    if (key.name === "down") { moveSelection(1); return; }
 
     // Run all
     if (key.name === "R" || (key.shift && key.name === "r")) {
@@ -507,23 +569,17 @@ async function main() {
 
     // Run selected
     if (key.name === "r" || key.name === "return") {
-      const opt = fileSelect.getSelectedOption();
-      if (!opt) return;
-      runTests(opt.value === "__all__" ? null : opt.value);
+      runTests(getSelectedValue());
     }
 
     // Update snapshots for selected
     if (key.name === "u") {
-      const opt = fileSelect.getSelectedOption();
-      if (!opt) return;
-      runTests(opt.value === "__all__" ? null : opt.value, true);
+      runTests(getSelectedValue(), true);
     }
 
     // Open in GUI mode
     if (key.name === "g") {
-      const opt = fileSelect.getSelectedOption();
-      if (!opt) return;
-      openGui(opt.value === "__all__" ? null : opt.value);
+      openGui(getSelectedValue());
     }
   });
 
