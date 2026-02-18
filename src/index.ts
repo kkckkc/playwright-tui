@@ -9,98 +9,10 @@ import {
   dim,
 } from "@opentui/core";
 import { spawn, type ChildProcess } from "child_process";
-import { readdirSync, existsSync } from "fs";
-import { resolve, join, relative, basename } from "path";
-
-// ── Constants ────────────────────────────────────────────────────────────────
-
-const targetArg = process.argv[2];
-if (!targetArg) {
-  console.error("Usage: playwright-tui <path-to-project>");
-  console.error("  <path-to-project> must contain a playwright.config.js or playwright.config.ts");
-  process.exit(1);
-}
-
-const ROOT = resolve(targetArg);
-
-if (!existsSync(ROOT)) {
-  console.error(`Error: directory not found: ${ROOT}`);
-  process.exit(1);
-}
-
-const hasConfig =
-  existsSync(join(ROOT, "playwright.config.js")) ||
-  existsSync(join(ROOT, "playwright.config.ts")) ||
-  existsSync(join(ROOT, "playwright.config.mjs")) ||
-  existsSync(join(ROOT, "playwright.config.cjs"));
-
-if (!hasConfig) {
-  console.error(`Error: no playwright.config.js / playwright.config.ts found in ${ROOT}`);
-  process.exit(1);
-}
-
-const PLAYWRIGHT_BIN = resolve(ROOT, "node_modules/.bin/playwright");
-
-if (!existsSync(PLAYWRIGHT_BIN)) {
-  console.error(`Error: playwright not found at ${PLAYWRIGHT_BIN}`);
-  console.error("Make sure node_modules is installed in the target project.");
-  process.exit(1);
-}
-
-const COLORS = {
-  bg: "#0d1117",
-  bgPanel: "#161b22",
-  border: "#30363d",
-  text: "#c9d1d9",
-  muted: "#8b949e",
-  green: "#7ee787",
-  red: "#f85149",
-  yellow: "#e3b341",
-  blue: "#58a6ff",
-  selectedBg: "#1f6feb",
-};
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-const stripAnsi = (str: string): string => {
-  return str.replace(
-    // eslint-disable-next-line no-control-regex
-    /[\x1B\x9B][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><~]/g,
-    ""
-  );
-}
-
-const getTestFiles = (): string[] => {
-  const results: string[] = [];
-  const ignored = new Set(["node_modules", ".git", "dist", "build", ".next", "out"]);
-
-  const scan = (dir: string) => {
-    let entries;
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      if (ignored.has(entry.name) || entry.name.startsWith(".")) continue;
-      if (entry.isDirectory()) {
-        scan(join(dir, entry.name));
-      } else if (
-        entry.name.endsWith(".spec.ts") ||
-        entry.name.endsWith(".test.ts") ||
-        entry.name.endsWith(".spec.js") ||
-        entry.name.endsWith(".test.js") ||
-        entry.name.endsWith(".spec.mts") ||
-        entry.name.endsWith(".test.mts")
-      ) {
-        results.push(relative(ROOT, join(dir, entry.name)));
-      }
-    }
-  }
-
-  scan(ROOT);
-  return results.sort();
-}
+import { join, basename } from "path";
+import { ROOT, PLAYWRIGHT_BIN, COLORS } from "./config";
+import { stripAnsi, getTestFiles } from "./files";
+import { colorizeLine } from "./output";
 
 // ── Main ─────────────────────────────────────────────────────────────────────
 
@@ -403,18 +315,6 @@ const main = async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (child as any).destroyRecursively?.() ?? (child as any).destroy?.();
     }
-  }
-
-  const colorizeLine = (raw: string): unknown => {
-    const line = stripAnsi(raw);
-    if (/✓|passed|PASS\b/.test(line)) return t`${fg(COLORS.green)(line)}`;
-    if (/✗|✘|×|FAIL\b|Error:/.test(line)) return t`${fg(COLORS.red)(line)}`;
-    if (/^\s+\d+ passed/.test(line))
-      return t`${bold(fg(COLORS.green)(line))}`;
-    if (/^\s+\d+ failed/.test(line)) return t`${bold(fg(COLORS.red)(line))}`;
-    if (/Running|Connecting|chromium|webkit|firefox/.test(line))
-      return t`${fg(COLORS.yellow)(line)}`;
-    return t`${fg(COLORS.muted)(line)}`;
   }
 
   const processLine = (raw: string, isStderr = false) => {
