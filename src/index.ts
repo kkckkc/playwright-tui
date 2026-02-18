@@ -188,7 +188,7 @@ async function main() {
       id: "header-hint",
       content: t`${dim(
         fg(COLORS.muted)(
-          "↑↓ navigate · r run · a run all · x stop · q quit"
+          "↑↓ navigate · r run · R run all · u update snapshots · g gui · x stop · q quit"
         )
       )}`,
     })
@@ -250,7 +250,7 @@ async function main() {
   const hintBox = new BoxRenderable(renderer, {
     id: "hints",
     width: "100%",
-    height: 7,
+    height: 9,
     border: ["top"],
     borderStyle: "single",
     borderColor: COLORS.border,
@@ -262,7 +262,9 @@ async function main() {
 
   for (const [key, desc] of [
     ["r / ↵", "run selected file"],
-    ["a    ", "run all tests"],
+    ["R    ", "run all tests"],
+    ["u    ", "update snapshots"],
+    ["g    ", "open in GUI mode"],
     ["x    ", "stop running"],
     ["q    ", "quit"],
   ]) {
@@ -392,7 +394,7 @@ async function main() {
 
   // ── Test runner ───────────────────────────────────────────────────────────
 
-  function runTests(file: string | null) {
+  function runTests(file: string | null, updateSnapshots = false) {
     if (running) {
       appendOutput(
         t`${fg(COLORS.yellow)("Already running — press x to stop")}`
@@ -408,12 +410,14 @@ async function main() {
     const label = file ?? "all tests";
     const divider = t`${dim(fg(COLORS.border)("─".repeat(60)))}`;
 
-    appendOutput(t`${bold(fg(COLORS.green)("▶"))} ${bold(`Running ${label}`)}`);
+    const actionLabel = updateSnapshots ? `Updating snapshots for ${label}` : `Running ${label}`;
+    appendOutput(t`${bold(fg(COLORS.green)("▶"))} ${bold(actionLabel)}`);
     appendOutput(divider);
-    statusText.content = t`${fg(COLORS.yellow)(`⟳  Running ${label}…`)}`;
+    statusText.content = t`${fg(COLORS.yellow)(`⟳  ${actionLabel}…`)}`;
     updateCounts();
 
     const args = ["test", "--reporter=list"];
+    if (updateSnapshots) args.push("--update-snapshots");
     if (file) args.push(join(ROOT, file));
 
     const proc = spawn(PLAYWRIGHT_BIN, args, { cwd: ROOT });
@@ -458,6 +462,22 @@ async function main() {
     });
   }
 
+  // ── GUI mode launcher ─────────────────────────────────────────────────────
+
+  function openGui(file: string | null) {
+    const label = file ?? "all tests";
+    appendOutput(t`${bold(fg(COLORS.blue)("⬡"))} ${bold(`Opening GUI for ${label}`)}`);
+
+    const args = ["test", "--ui"];
+    if (file) args.push(join(ROOT, file));
+
+    spawn(PLAYWRIGHT_BIN, args, {
+      cwd: ROOT,
+      detached: true,
+      stdio: "ignore",
+    }).unref();
+  }
+
   // ── Key bindings ──────────────────────────────────────────────────────────
 
   fileSelect.focus();
@@ -469,7 +489,7 @@ async function main() {
     }
 
     // Run all
-    if (key.name === "a") {
+    if (key.name === "R" || (key.shift && key.name === "r")) {
       runTests(null);
       return;
     }
@@ -490,6 +510,20 @@ async function main() {
       const opt = fileSelect.getSelectedOption();
       if (!opt) return;
       runTests(opt.value === "__all__" ? null : opt.value);
+    }
+
+    // Update snapshots for selected
+    if (key.name === "u") {
+      const opt = fileSelect.getSelectedOption();
+      if (!opt) return;
+      runTests(opt.value === "__all__" ? null : opt.value, true);
+    }
+
+    // Open in GUI mode
+    if (key.name === "g") {
+      const opt = fileSelect.getSelectedOption();
+      if (!opt) return;
+      openGui(opt.value === "__all__" ? null : opt.value);
     }
   });
 
