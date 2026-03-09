@@ -201,6 +201,7 @@ const main = async () => {
     if (isSelected) return t`${fg("#ffffff")(label)}`;
     const status = value !== "__all__" ? state.fileStatus.get(value) : undefined;
     if (status === "failed") return t`${fg(COLORS.red)(label)}`;
+    if (status === "passed") return t`${fg(COLORS.green)(label)}`;
     return t`${fg(COLORS.text)(label)}`;
   }
 
@@ -430,6 +431,13 @@ const main = async () => {
     state.failCount = 0;
     clearOutput(state);
 
+    // Reset statuses for the files being run so stale results don't persist
+    if (file) {
+      state.fileStatus.delete(file);
+    } else {
+      state.fileStatus.clear();
+    }
+
     const label = file ?? "all tests";
     const divider = t`${dim(fg(COLORS.border)("─".repeat(60)))}`;
 
@@ -487,12 +495,16 @@ const main = async () => {
         }
       }
 
-      // For single-file runs, update its status if not already set by line parsing
+      // Update file statuses based on run results
       if (file) {
-        if (code === 0) {
-          state.fileStatus.set(file, "passed");
-        } else if (!state.fileStatus.has(file)) {
-          state.fileStatus.set(file, "failed");
+        // Single-file run: exit code is the authoritative result
+        state.fileStatus.set(file, code === 0 ? "passed" : "failed");
+      } else {
+        // Run-all: files not detected as failed during output parsing passed
+        for (const f of state.testFiles) {
+          if (!state.fileStatus.has(f)) {
+            state.fileStatus.set(f, "passed");
+          }
         }
       }
 
